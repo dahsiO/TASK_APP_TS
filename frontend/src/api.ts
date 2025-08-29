@@ -2,10 +2,13 @@ import axios from "axios";
 
 const API = "https://task-app-ts.onrender.com";
 
-// ✅ type des tâches
+// ✅ type des tâches (côté front)
 export type Task = {
   id: number;
   text: string;
+  priority?: "low" | "medium" | "high";
+  dueDate?: string | null;
+  comment?: string | null;
 };
 
 // ✅ Auth
@@ -21,8 +24,11 @@ export const getTasks = (token: string) =>
     headers: { Authorization: `Bearer ${token}` },
   });
 
-export const addTask = (text: string, token: string) =>
-  axios.post<Task>(`${API}/tasks`, { text }, {
+export const addTask = (
+  task: { text: string; priority?: string; dueDate?: string; comment?: string },
+  token: string
+) =>
+  axios.post<Task>(`${API}/tasks`, task, {
     headers: { Authorization: `Bearer ${token}` },
   });
 
