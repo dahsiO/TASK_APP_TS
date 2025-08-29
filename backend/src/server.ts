@@ -1,148 +1,134 @@
-import express, { Request, Response } from "express";
+// backend/src/server.ts
+import express from "express";
 import cors from "cors";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { Pool } from "pg";
 
-// ============================
-// CONFIG
-// ============================
 const app = express();
-const PORT = process.env.PORT || 4000;
-const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
-
 app.use(cors());
 app.use(express.json());
 
-// ============================
-// DATABASE
-// ============================
-let db: any;
+// ====================
+// 📦 Config Database
+// ====================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || "postgresql://taskdata_user:UyIdo2aCzbn4YlsQrMrH8AXzgOorgbkH@dpg-d2ov4njipnbc73a9g2e0-a.frankfurt-postgres.render.com/taskdata",
+  ssl: {
+    rejectUnauthorized: false, // Render nécessite SSL
+  },
+});
 
-(async () => {
-  db = await open({
-    filename: "./database.db",
-    driver: sqlite3.Database,
-  });
+// ====================
+// 🔑 JWT Secret
+// ====================
+const JWT_SECRET = process.env.JWT_SECRET || "secret123";
 
-  // Table Users
-  await db.exec(`
+// ====================
+// 🛠 Init DB Tables
+// ====================
+async function initDB() {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       email TEXT UNIQUE,
       password TEXT
-    )
+    );
   `);
 
-  // Table Tasks
-  await db.exec(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      text TEXT NOT NULL,
-      priority TEXT DEFAULT 'low',
+      id SERIAL PRIMARY KEY,
+      text TEXT,
+      priority TEXT,
       dueDate TEXT,
       comment TEXT,
-      userId INTEGER,
-      FOREIGN KEY(userId) REFERENCES users(id)
-    )
+      userId INTEGER REFERENCES users(id) ON DELETE CASCADE
+    );
   `);
-})();
+}
+initDB();
 
-// ============================
-// MIDDLEWARE AUTH
-// ============================
-function auth(req: any, res: Response, next: any) {
+// ====================
+// 🔐 Middleware Auth
+// ====================
+function authMiddleware(req: any, res: any, next: any) {
   const authHeader = req.headers["authorization"];
-  if (!authHeader) return res.status(401).json({ error: "Token manquant" });
+  if (!authHeader) return res.status(401).json({ error: "No token" });
 
   const token = authHeader.split(" ")[1];
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { id: number };
+  jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
+    if (err) return res.status(403).json({ error: "Invalid token" });
     req.user = decoded;
     next();
-  } catch {
-    return res.status(403).json({ error: "Token invalide" });
-  }
+  });
 }
 
-// ============================
-// AUTH ROUTES
-// ============================
+// ====================
+// 🚀 ROUTES
+// ====================
 
 // Register
-app.post("/auth/register", async (req: Request, res: Response) => {
+app.post("/auth/register", async (req, res) => {
   const { email, password } = req.body;
   try {
     const hashed = await bcrypt.hash(password, 10);
-    await db.run("INSERT INTO users (email, password) VALUES (?, ?)", [
+    await pool.query("INSERT INTO users (email, password) VALUES ($1, $2)", [
       email,
       hashed,
     ]);
     res.json({ success: true });
-  } catch {
+  } catch (err) {
     res.status(400).json({ error: "Email déjà utilisé" });
   }
 });
 
 // Login
-app.post("/auth/login", async (req: Request, res: Response) => {
+app.post("/auth/login", async (req, res) => {
   const { email, password } = req.body;
-  const user = await db.get("SELECT * FROM users WHERE email = ?", [email]);
-
+  const result = await pool.query("SELECT * FROM users WHERE email=$1", [email]);
+  const user = result.rows[0];
   if (!user) return res.status(400).json({ error: "Utilisateur non trouvé" });
 
-  const match = await bcrypt.compare(password, user.password);
-  if (!match) return res.status(400).json({ error: "Mot de passe incorrect" });
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) return res.status(400).json({ error: "Mot de passe incorrect" });
 
   const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "1h" });
   res.json({ token });
 });
 
-// ============================
-// TASKS ROUTES
-// ============================
-
-// Get all tasks for user
-app.get("/tasks", auth, async (req: any, res: Response) => {
-  const tasks = await db.all("SELECT * FROM tasks WHERE userId = ?", [
+// Get tasks
+app.get("/tasks", authMiddleware, async (req: any, res) => {
+  const result = await pool.query("SELECT * FROM tasks WHERE userId=$1", [
     req.user.id,
   ]);
-  res.json(tasks);
+  res.json(result.rows);
 });
 
 // Add task
-app.post("/tasks", auth, async (req: any, res: Response) => {
+app.post("/tasks", authMiddleware, async (req: any, res) => {
   const { text, priority, dueDate, comment } = req.body;
-
-  const result = await db.run(
-    "INSERT INTO tasks (text, userId, priority, dueDate, comment) VALUES (?, ?, ?, ?, ?)",
-    [text, req.user.id, priority || "low", dueDate || null, comment || null]
+  const result = await pool.query(
+    "INSERT INTO tasks (text, priority, dueDate, comment, userId) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+    [text, priority, dueDate, comment, req.user.id]
   );
-
-  res.json({
-    id: result.lastID,
-    text,
-    priority: priority || "low",
-    dueDate: dueDate || null,
-    comment: comment || null,
-  });
+  res.json(result.rows[0]);
 });
 
-
 // Delete task
-app.delete("/tasks/:id", auth, async (req: any, res: Response) => {
+app.delete("/tasks/:id", authMiddleware, async (req: any, res) => {
   const { id } = req.params;
-  await db.run("DELETE FROM tasks WHERE id = ? AND userId = ?", [
+  await pool.query("DELETE FROM tasks WHERE id=$1 AND userId=$2", [
     id,
     req.user.id,
   ]);
   res.json({ success: true });
 });
 
-// ============================
-// START SERVER
-// ============================
+// ====================
+// 🌍 Start Server
+// ====================
+const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`✅ Backend running on http://localhost:${PORT}`);
+  console.log(`Backend running on http://localhost:${PORT}`);
 });
